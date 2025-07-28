@@ -57,25 +57,31 @@ if ($token !== API_TOKEN) {
     send_response('erro', 'Token inválido.');
 }
 
-// ########## MUDANÇA 1: De `php://input` para `$_POST` e `$_FILES` ##########
-// Em vez de ler o corpo bruto, agora esperamos um campo de formulário chamado 'kpi_data' com o JSON
-// e arquivos separados que serão tratados pela superglobal $_FILES.
-
-if (!isset($_POST['kpi_data'])) {
-    write_log("Erro: campo 'kpi_data' ausente na requisição multipart.");
-    send_response('erro', "Payload JSON 'kpi_data' ausente.");
+// Lógica de recepção robusta para lidar com multipart ou JSON bruto
+$input_json = null;
+if (isset($_POST['kpi_data'])) {
+    // Cenário 1: Requisição multipart/form-data
+    $input_json = $_POST['kpi_data'];
+    write_log("Recebido via multipart/form-data.");
+} else {
+    // Cenário 2: Requisição com corpo bruto (para testes ou compatibilidade)
+    $raw_input = file_get_contents('php://input');
+    if (!empty($raw_input)) {
+        $input_json = $raw_input;
+        write_log("Recebido via corpo bruto (php://input).");
+    }
 }
 
-$input_json = $_POST['kpi_data'];
-write_log("JSON recebido via $_POST[kpi_data]: $input_json");
+if ($input_json === null) {
+    write_log("Erro: Nenhum dado recebido (nem em 'kpi_data' nem no corpo da requisição).");
+    send_response('erro', 'Nenhum dado recebido.');
+}
 
 $data = json_decode($input_json, true);
 if (json_last_error() !== JSON_ERROR_NONE) {
     write_log("Erro de decodificação JSON: " . json_last_error_msg());
-    send_response('erro', 'JSON inválido em kpi_data.');
+    send_response('erro', 'JSON inválido.');
 }
-// ########## FIM DA MUDANÇA 1 ##########
-
 
 if (isset($data['test'])) {
     write_log("Requisição de teste recebida, ignorando inserção.");
@@ -117,8 +123,6 @@ $map = [
     'DURACAO DIVERGENCIA' => 'DURACAO_DIVERGENCIA',
     'DURACAO INVENTARIO' => 'DURACAO_INVENTARIO',
     'APH PREVISTO' => 'APH_PREVISTO',
-    // O mapeamento dos campos base64 não é mais necessário aqui,
-    // pois vamos lidar com os arquivos diretamente.
 ];
 
 $mysqli = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
@@ -144,15 +148,9 @@ foreach ($inventarios as $i => $inv) {
             $inv[$dbKey] = $inv[$jsonKey];
         }
     }
+
+    $indice_lote = $i;
     
-    // ########## MUDANÇA 2: Processar arquivos de `$_FILES` ##########
-    // Em vez de esperar dados Base64 no JSON, procuramos por arquivos enviados.
-    // O nome do arquivo no upload (ex: 'detalhes_csv_0', 'pdf_divergencia_0') será
-    // construído dinamicamente pelo cliente Python.
-    
-    $indice_lote = $i; // Usamos o índice do inventário no lote
-    
-    // Processa o arquivo CSV dos detalhes dos itens
     $nome_arquivo_csv = 'detalhes_csv_' . $indice_lote;
     if (isset($_FILES[$nome_arquivo_csv]) && $_FILES[$nome_arquivo_csv]['error'] === UPLOAD_ERR_OK) {
         $caminho_tmp = $_FILES[$nome_arquivo_csv]['tmp_name'];
@@ -160,10 +158,9 @@ foreach ($inventarios as $i => $inv) {
         $inv['CONTAGEM_CSV_BASE64'] = base64_encode($conteudo_csv);
         write_log("Arquivo CSV para OS {$inv['OS']} processado com sucesso.");
     } else {
-        $inv['CONTAGEM_CSV_BASE64'] = null; // Garante que o campo seja nulo se o arquivo não for enviado.
+        $inv['CONTAGEM_CSV_BASE64'] = null;
     }
     
-    // Processa o arquivo PDF de divergência
     $nome_arquivo_pdf = 'pdf_divergencia_' . $indice_lote;
     if (isset($_FILES[$nome_arquivo_pdf]) && $_FILES[$nome_arquivo_pdf]['error'] === UPLOAD_ERR_OK) {
         $caminho_tmp_pdf = $_FILES[$nome_arquivo_pdf]['tmp_name'];
@@ -173,7 +170,6 @@ foreach ($inventarios as $i => $inv) {
     } else {
         $inv['AJUSTE_PDF_BASE64'] = null;
     }
-    // ########## FIM DA MUDANÇA 2 ##########
 
     $data_base = $inv['DATA'] ?? '';
     $data_obj = DateTime::createFromFormat('d/m/Y', $data_base);
@@ -186,13 +182,12 @@ foreach ($inventarios as $i => $inv) {
     $inv['HORARIO_TERMINO_DE_DIVERGENCIA'] = merge_datetime($data_base, $inv['HORARIO_TERMINO_DE_DIVERGENCIA'] ?? null, $inicio_contagem);
     $inv['HORARIO_TERMINO_INVENTARIO'] = merge_datetime($data_base, $inv['HORARIO_TERMINO_INVENTARIO'] ?? null, $inicio_contagem);
 
-
     $inv['PIV_PESSOAS_PREVISTAS'] = to_int($inv['PIV_PESSOAS_PREVISTAS'] ?? 0);
     $inv['QTD_PESSOAS_ENVIADAS'] = to_int($inv['QTD_PESSOAS_ENVIADAS'] ?? 0);
     $inv['TOTAL_DE_PECAS_PREVISTA'] = to_int($inv['TOTAL_DE_PECAS_PREVISTA'] ?? 0);
     $inv['TOTAL_DE_PECAS_COLETADAS'] = to_int($inv['TOTAL_DE_PECAS_COLETADAS'] ?? 0);
     $inv['TOTAL_DE_ITENS_COLETADOS'] = to_int($inv['TOTAL_DE_ITENS_COLETADOS'] ?? 0);
-    $inv['TOTAL_DE_ITENS_DIVERGENTES'] = to_int($inv['TOTAL_DE_ITENS_DIVERGENTES'] ?? 0);
+    $inv['TOTAL_DE_ITENS_DIVERGENTES'] = to_int($inv['TOTAL_DE_ITENS_DIVERGentes'] ?? 0);
     $inv['TOTAL_DE_ITENS_ALTERADOS'] = to_int($inv['TOTAL_DE_ITENS_ALTERADOS'] ?? 0);
     $inv['INACURACIDADE'] = to_float($inv['INACURACIDADE'] ?? 0);
     $inv['ACURACIDADE'] = to_float($inv['ACURACIDADE'] ?? 0);
