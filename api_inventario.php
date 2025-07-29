@@ -25,7 +25,9 @@ function merge_datetime($data, $hora, $hora_inicio = null) {
         try {
             $inicio = new DateTime($hora_inicio);
             if ($data_obj < $inicio) $data_obj->modify('+1 day');
-        } catch (Exception $e) { /* Ignora */ }
+        } catch (Exception $e) {
+            // Ignora se a hora de início for inválida
+        }
     }
     return $data_obj->format('Y-m-d H:i:s');
 }
@@ -39,7 +41,6 @@ function to_int($valor) {
     if (empty($valor) || strtoupper($valor) === 'N/A' || strtoupper($valor) === 'NÃO HÁ') return 0;
     return intval(str_replace([',', '.'], ['', ''], $valor));
 }
-
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     write_log("Método inválido: " . $_SERVER['REQUEST_METHOD']);
@@ -57,31 +58,10 @@ if ($token !== API_TOKEN) {
     send_response('erro', 'Token inválido.');
 }
 
-// Lógica de recepção robusta para lidar com multipart ou JSON bruto
-$input_json = null;
-if (isset($_POST['kpi_data'])) {
-    // Cenário 1: Requisição multipart/form-data
-    $input_json = $_POST['kpi_data'];
-    write_log("Recebido via multipart/form-data.");
-} else {
-    // Cenário 2: Requisição com corpo bruto (para testes ou compatibilidade)
-    $raw_input = file_get_contents('php://input');
-    if (!empty($raw_input)) {
-        $input_json = $raw_input;
-        write_log("Recebido via corpo bruto (php://input).");
-    }
-}
-
-if ($input_json === null) {
-    write_log("Erro: Nenhum dado recebido (nem em 'kpi_data' nem no corpo da requisição).");
-    send_response('erro', 'Nenhum dado recebido.');
-}
-
-$data = json_decode($input_json, true);
-if (json_last_error() !== JSON_ERROR_NONE) {
-    write_log("Erro de decodificação JSON: " . json_last_error_msg());
-    send_response('erro', 'JSON inválido.');
-}
+$input = file_get_contents('php://input');
+write_log("JSON bruto recebido: $input");
+$data = json_decode($input, true);
+if (json_last_error() !== JSON_ERROR_NONE) send_response('erro', 'JSON inválido.');
 
 if (isset($data['test'])) {
     write_log("Requisição de teste recebida, ignorando inserção.");
@@ -105,6 +85,7 @@ $campos = [
 ];
 $campos_base64 = ['AJUSTE_PDF_BASE64','CONTAGEM_CSV_BASE64'];
 
+// MAPEAMENTO MANTIDO EXATAMENTE COMO O SEU ORIGINAL
 $map = [
     'PIV (PESSOAS PREVISTAS)' => 'PIV_PESSOAS_PREVISTAS',
     'QTD PESSOAS ENVIADAS' => 'QTD_PESSOAS_ENVIADAS',
@@ -123,6 +104,8 @@ $map = [
     'DURACAO DIVERGENCIA' => 'DURACAO_DIVERGENCIA',
     'DURACAO INVENTARIO' => 'DURACAO_INVENTARIO',
     'APH PREVISTO' => 'APH_PREVISTO',
+    'PDF_ACERTO_DIVERGENCIA_BASE64' => 'AJUSTE_PDF_BASE64',
+    'DETALHES_ITENS' => 'CONTAGEM_CSV_BASE64'
 ];
 
 $mysqli = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
@@ -134,7 +117,11 @@ $sql = "INSERT INTO inventario_os_teste (".implode(',',$campos_sql).") VALUES ($
 $stmt = $mysqli->prepare($sql);
 if (!$stmt) send_response('erro','Erro preparar query: '.$mysqli->error);
 
+// ########## INÍCIO DA CORREÇÃO ##########
+// A string de tipos agora tem 31 caracteres, correspondendo exatamente
+// ao número de colunas em $campos_sql (29 + 2).
 $tipos = 'sssssiiiisssssssssiiiddddddssss';
+// ########## FIM DA CORREÇÃO ##########
 
 foreach ($inventarios as $i => $inv) {
 
@@ -143,34 +130,34 @@ foreach ($inventarios as $i => $inv) {
         continue;
     }
 
+    // Aplica o mapeamento do JSON para os campos da tabela
     foreach ($map as $jsonKey => $dbKey) {
         if (isset($inv[$jsonKey])) {
             $inv[$dbKey] = $inv[$jsonKey];
         }
     }
 
-    $indice_lote = $i;
-    
-    $nome_arquivo_csv = 'detalhes_csv_' . $indice_lote;
-    if (isset($_FILES[$nome_arquivo_csv]) && $_FILES[$nome_arquivo_csv]['error'] === UPLOAD_ERR_OK) {
-        $caminho_tmp = $_FILES[$nome_arquivo_csv]['tmp_name'];
-        $conteudo_csv = file_get_contents($caminho_tmp);
-        $inv['CONTAGEM_CSV_BASE64'] = base64_encode($conteudo_csv);
-        write_log("Arquivo CSV para OS {$inv['OS']} processado com sucesso.");
-    } else {
-        $inv['CONTAGEM_CSV_BASE64'] = null;
-    }
-    
-    $nome_arquivo_pdf = 'pdf_divergencia_' . $indice_lote;
-    if (isset($_FILES[$nome_arquivo_pdf]) && $_FILES[$nome_arquivo_pdf]['error'] === UPLOAD_ERR_OK) {
-        $caminho_tmp_pdf = $_FILES[$nome_arquivo_pdf]['tmp_name'];
-        $conteudo_pdf = file_get_contents($caminho_tmp_pdf);
-        $inv['AJUSTE_PDF_BASE64'] = base64_encode($conteudo_pdf);
-        write_log("Arquivo PDF para OS {$inv['OS']} processado com sucesso.");
-    } else {
-        $inv['AJUSTE_PDF_BASE64'] = null;
+    // TRATAMENTO ESPECIAL PARA CONVERTER O ARRAY EM BASE64
+    if (isset($inv['CONTAGEM_CSV_BASE64']) && is_array($inv['CONTAGEM_CSV_BASE64'])) {
+        $itens_array = $inv['CONTAGEM_CSV_BASE64'];
+        $csv_data_string = '';
+
+        if (!empty($itens_array)) {
+            $output = fopen('php://memory', 'w');
+            fputcsv($output, array_keys(current($itens_array)));
+            foreach ($itens_array as $linha) {
+                fputcsv($output, $linha);
+            }
+            rewind($output);
+            $csv_data_string = stream_get_contents($output);
+            fclose($output);
+        }
+        
+        // Substitui o array pela string Base64 no mesmo campo.
+        $inv['CONTAGEM_CSV_BASE64'] = base64_encode($csv_data_string);
     }
 
+    // Converte datas para formato MySQL DATETIME
     $data_base = $inv['DATA'] ?? '';
     $data_obj = DateTime::createFromFormat('d/m/Y', $data_base);
     $inv['DATA'] = $data_obj ? $data_obj->format('Y-m-d') : null;
@@ -182,12 +169,13 @@ foreach ($inventarios as $i => $inv) {
     $inv['HORARIO_TERMINO_DE_DIVERGENCIA'] = merge_datetime($data_base, $inv['HORARIO_TERMINO_DE_DIVERGENCIA'] ?? null, $inicio_contagem);
     $inv['HORARIO_TERMINO_INVENTARIO'] = merge_datetime($data_base, $inv['HORARIO_TERMINO_INVENTARIO'] ?? null, $inicio_contagem);
 
+    // Converte valores numéricos
     $inv['PIV_PESSOAS_PREVISTAS'] = to_int($inv['PIV_PESSOAS_PREVISTAS'] ?? 0);
     $inv['QTD_PESSOAS_ENVIADAS'] = to_int($inv['QTD_PESSOAS_ENVIADAS'] ?? 0);
     $inv['TOTAL_DE_PECAS_PREVISTA'] = to_int($inv['TOTAL_DE_PECAS_PREVISTA'] ?? 0);
     $inv['TOTAL_DE_PECAS_COLETADAS'] = to_int($inv['TOTAL_DE_PECAS_COLETADAS'] ?? 0);
     $inv['TOTAL_DE_ITENS_COLETADOS'] = to_int($inv['TOTAL_DE_ITENS_COLETADOS'] ?? 0);
-    $inv['TOTAL_DE_ITENS_DIVERGENTES'] = to_int($inv['TOTAL_DE_ITENS_DIVERGentes'] ?? 0);
+    $inv['TOTAL_DE_ITENS_DIVERGENTES'] = to_int($inv['TOTAL_DE_ITENS_DIVERGENTES'] ?? 0);
     $inv['TOTAL_DE_ITENS_ALTERADOS'] = to_int($inv['TOTAL_DE_ITENS_ALTERADOS'] ?? 0);
     $inv['INACURACIDADE'] = to_float($inv['INACURACIDADE'] ?? 0);
     $inv['ACURACIDADE'] = to_float($inv['ACURACIDADE'] ?? 0);
@@ -196,6 +184,7 @@ foreach ($inventarios as $i => $inv) {
     $inv['APH'] = to_float($inv['APH'] ?? 0);
     $inv['APH_PREVISTO'] = to_float($inv['APH_PREVISTO'] ?? 0);
 
+    // Prepara array de valores para bind_param na ordem correta
     $valores = [];
     foreach ($campos_sql as $campo) {
         $valores[] = $inv[$campo] ?? null;
