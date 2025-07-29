@@ -2,10 +2,10 @@
 // Configurações do banco e token de autenticação
 
 // Dados do banco Azure SQL
-define('DB_HOST', 'https://48d072420788.ngrok-free.app/inv/api_inventario.php');
-define('DB_USER', 'root');
-define('DB_PASS', '');
-define('DB_NAME', 'test');
+define('DB_HOST', 'ds-srv01.database.windows.net');
+define('DB_USER', 'datasite_user');
+define('DB_PASS', 'Dat@_$1te854p44%!');
+define('DB_NAME', 'DatasitePRD');
 
 // Token fixo para autenticação da API
 // Altere para um valor seguro e secreto
